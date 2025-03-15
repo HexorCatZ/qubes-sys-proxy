@@ -1,0 +1,208 @@
+#!/bin/bash
+# place the code below to /rw/config/rc.local on your template qube.
+# if its disposable qube, please add this to your AppVM instead.
+
+# sorry for lacking any comment on the code since i try to get as
+# minimal as possible in the /rw/config/rc.local.
+# (i dont like creating a lot of files or executable)
+# this code was only uploaded after (i think) its stable enough to be uploaded.
+# please push if you think something can be improved.
+
+# the setup im using :
+# i use this code for my work qube to connect to my office.
+# since i cant leak my original ip address because our server will ban a user if its
+# logged in from another places as they thought its probably hacked account or unautherized login.
+# the setting is as follows.
+# 
+# (code below arent tested for error. just edit while uploading it. same as all of this comment)
+# > qvm-prefs work klass
+# AppVM
+# > qvm-prefs work template
+# fedora-41
+# > qvm-prefs work netvm ''
+# > qvm-run -u root work 'echo qvm-connect-tcp 9050:sys-proxy:9050 >> /rw/config/rc.local'
+# (or edit /rw/config/rc.local using vim, nano, or any of your prefered editor and add those command.)
+# (then i edit firefox to use proxy)
+# (firefox > settings > search for 'proxy' > network setting > settings > manual proxy... > 
+# socks host: 127.0.0.1 > port: 9050 > mark 'socks v5')
+# other program need to use proxychains if they arent support proxy by default.
+#     example : 'proxychains curl 1.1.1.1'
+
+# USAGE :
+# 1. when the vm start, the program should appear on the notification area.
+# 2. clicking on it shoult popped up a menu.
+#   - choose server = pick a server before starting. it will ask for ssh password and test it.
+#   - authenticate = if the previous password is wrong. you will have this options. it just re-auth.
+#   - connect = if the password is correct, you may connect to the server.
+#   - disconnect = disconnecting from the server. only available after you connect.
+#   - shutdown $HOSTNAME = exit the program, shutdown the system.
+
+# NOTE :
+# you dont have to start the sys-proxy qube if you dont want to.
+# it will start when the other qube connecting to it.
+
+# INSTALLATION :
+# please edit or remove this line if you are not using it.
+# i use it since theres a lot of qube listed below with specific qube related setting
+# like run alienfx if its sys-usb for keyboard color etc.
+# you may also set if the 
+if [ $HOSTNAME == othersVM ]; then
+  others vms code
+#
+# the actual code for the sys-proxy
+# im using ssh-j.com for this example since im using it.
+# you may change accordingly as you wish including the $HOSTNAME if you are using a different name for the qube
+# 1. please edit the server list below the 'declare -A servers'
+# 2. replace all ssh-j.com jump server including on the 'ssh-keyscan -H ssh-j.com >> ~/.ssh/known_hosts' lines.
+# 3. make sure yad,sshpass,ssh and others that i probably forget, was installed.
+# 4. install optional program such as proxychains on the template of the AppVM that you are going to use this if you need it.
+elif [ $HOSTNAME == sys-proxy ]; then
+	sleep 5
+	(su user -c '
+		export DISPLAY=:0
+		declare -A servers=(
+			["1. Main Server"]="-J sshj-username@ssh-j.com username@your-computername"
+			["2. Backup Server"]="-J sshj-username@ssh-j.com username@your-computername"
+			["3. Last Resort (slow) Server"]="-J sshj-username@ssh-j.com username@your-computername"
+		)
+		
+		PIPE=$(mktemp -u --tmpdir ${0##*/}.XXXXXXXX)
+		mkfifo "$PIPE"
+		exec 3<> "$PIPE"
+		
+		function on_exit() {
+			echo "quit" >&3
+			rm -f "$PIPE"
+		}
+		trap on_exit EXIT
+		
+		function change_server () {
+			choose=$( yad --list --title="Select SSH Server" \
+				--column="Server Name" "${!servers[@]}" \
+				--width=300 --height=200 --center --window-icon=terminal --print-column=1 | cut -d \| -f 1)
+			if [ -z "$choose" ]; then
+				return 1
+			else
+				ssh_command=${servers[$choose]}
+			fi
+		}
+		
+		function pre_connect () {
+			notify-send -u low "$HOSTNAME: SSH Authenticating..." "Authenticating..."
+			export SSHPASS=$($SSH_ASKPASS "Please key in SSH Password")
+			if [ -z "$SSHPASS" ]; then
+				notify-send -u low "$HOSTNAME: SSH Authentication Failed" "Authentication cancelled by user"
+				return
+			fi
+		
+			for f in {1..5}; do
+				ssh_output=""
+				ssh_output=$( sshpass -e ssh -o StrictHostKeyChecking=accept-new ${servers[$choose]} exit 2>&1 )
+				if [ -z "$ssh_output" ]; then
+					notify-send "$HOSTNAME: SSH Authenticated" "Authenticated Succesfully"
+					return
+				elif echo "$ssh_output" | grep -q "Permission denied" ; then
+					notify-send -u low "$HOSTNAME: SSH Authentication Failed" "$ssh_output"
+					SSHPASS=""
+					return
+				fi
+				notify-send -u low "$HOSTNAME: SSH Authentication Failed" "[${f}/5] retry . . .\n${ssh_output}"
+				sleep 10
+			done
+			notify-send -u low "$HOSTNAME: SSH Authentication Failed" "Failed to verify after 5 attemps"
+			SSHPASS=""
+		}
+		
+		function start_ssh () {
+			notify-send "$HOSTNAME: Connecting to SSH..."
+			if ping 1.1.1.1 -c 1 > /dev/null ; then
+				(
+					ssh_output=$(sshpass -e ssh\
+					-o StrictHostKeyChecking=accept-new\
+					${ssh_command} -N -D 9050 </dev/null)
+					notify-send -u critical "$HOSTNAME: SSH Disconnected" "$ssh_output"
+				)&
+				ssh_pid=$!
+			fi
+			while ! netstat -aptn 2>&1 | grep LISTEN | grep 127.0.0.1:9050 > /dev/null ; do
+				sleep 1
+			done
+			notify-send "$HOSTNAME: Connected"
+		}
+		
+		export SSH_ASKPASS=/usr/libexec/openssh/ssh-askpass
+		if [ ! -d ~/.ssh ]; then mkdir ~/.ssh ; fi
+		while ! ping 1.1.1.1 -c 1 > /dev/null; do sleep 5 ; done
+		
+		if ! cat ~/.ssh/known_hosts | grep ssh-j.com > /dev/null ; then
+			ssh-keyscan -H ssh-j.com >> ~/.ssh/known_hosts
+			sleep 5
+		fi
+		
+				yad --notification \
+					--image="network-vpn-no-route-symbolic" \
+					--text="$HOSTNAME: disconnected" \
+					--menu="Choose Server!echo change||Shutdown $HOSTNAME!echo quit" \
+					--listen \
+					--command="menu" <&3 | while read input || true; do
+				if ! [ "$input" == "" ]; then
+					if [ "$input" == "quit" ]; then
+						sleep 3
+						echo quit >&3
+						sleep 2
+						exit
+					elif [ "$input" == "connect" ]; then
+						menu_icon="network-vpn-acquiring-symbolic"
+						echo tooltip:"${HOSTNAME}: Connecting...\nServer: ${choose}" >&3
+						start_ssh
+						echo tooltip:"${HOSTNAME}: Connected\nServer: ${choose}" >&3
+						toggle="Disconnect!echo disconnect|Restart!echo restart"
+						menu_icon="network-vpn-symbolic"
+					elif [ "$input" == "restart" ]; then
+						echo tooltip:"${HOSTNAME}: Disconnecting...\nServer: ${choose}" >&3
+						kill -s SIGINT ${ssh_pid}
+						menu_icon="network-vpn-acquiring-symbolic"
+						echo tooltip:"${HOSTNAME}: Connecting...\nServer: ${choose}" >&3
+						start_ssh
+						echo tooltip:"${HOSTNAME}: Connected\nServer: ${choose}" >&3
+						toggle="Disconnect!echo disconnect|Restart!echo restart"
+						menu_icon="network-vpn-symbolic"
+					elif [ "$input" == "disconnect" ]; then
+						echo tooltip:"${HOSTNAME}: Disconnecting...\nServer: ${choose}" >&3
+						kill -s SIGINT ${ssh_pid}
+						menu_icon="network-vpn-disabled-symbolic"
+						echo tooltip:"${HOSTNAME}: Not Connected\nServer: ${choose}" >&3
+						toggle="Connect!echo connect|Change Server!echo change"
+					elif [ "$input" == "change" ]; then
+						if change_server; then
+							echo tooltip:"${HOSTNAME}: Authenticating...\nServer: ${choose}" >&3
+							pre_connect
+							if [ -z "$SSHPASS" ]; then
+								toggle="Authenticate!echo auth|Change Server!echo change"
+								echo tooltip:"${HOSTNAME}: Disconnect\nServer: ${choose}" >&3
+							else
+								menu_icon="network-vpn-disabled-symbolic"
+								echo tooltip:"${HOSTNAME}: Not Connected\nServer: ${choose}" >&3
+								toggle="Connect!echo connect|Change Server!echo change"
+							fi
+						fi
+					elif [ "$input" == "auth" ]; then
+						echo tooltip:"${HOSTNAME}: Authenticating...\nServer: ${choose}" >&3
+						pre_connect
+						if [ -z "$SSHPASS" ]; then
+							toggle="Authenticate!echo auth|Change Server!echo change"
+							echo tooltip:"${HOSTNAME}: Disconnect\nServer: ${choose}" >&3
+						else
+							menu_icon="network-vpn-disabled-symbolic"
+							echo tooltip:"${HOSTNAME}: Not Connected\nServer: ${choose}" >&3
+							toggle="Connect!echo connect|Change Server!echo change"
+						fi
+					fi
+					if [ -n "$menu_icon" ]; then echo icon:${menu_icon} >&3 ; fi
+					if [ -n "$toggle" ]; then echo menu:"${toggle}||Shutdown Proxy $HOSTNAME!echo quit" >&3 ; fi
+				fi
+		
+			done
+		#yad end 
+	' ; poweroff) &
+fi
